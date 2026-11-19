@@ -11,7 +11,8 @@ private final class MockHTTP: URLProtocol {
             let (code, headers, body) = try Self.handler!(request)
             let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: headers)!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: try JSONSerialization.data(withJSONObject: body))
+            let data = try (body as? Data) ?? JSONSerialization.data(withJSONObject: body)
+            client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
         } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
@@ -26,6 +27,116 @@ final class GitHubTests: XCTestCase {
         api = GitHub(session: URLSession(configuration: config))
     }
     override func tearDown() { MockHTTP.handler = nil }
+
+    func testKoreyEnvironmentChoicesAndAttemptSpecificJobEvidence() async throws {
+        let repo = "useshortcut/monorepo"
+        let path = ".github/workflows/korey-frontend-zero_services_deploy.yml"
+        let yaml = """
+        on:
+          workflow_dispatch:
+            inputs:
+              environment: {type: choice, options: [staging, production]}
+        jobs:
+          deploy-services:
+            steps:
+              - name: Check Production Deployment
+                if: inputs.environment == 'production'
+          build-package:
+            steps:
+              - name: Read Zero Docker Tag
+                if: inputs.environment == 'staging'
+        """
+        var watch = Watch(repository: repo, environment: path, service: "Korey", stage: "Workflow", workflowID: 7)
+        watch.runFilter = WorkflowFilter(field: .input("environment"), value: "production")
+        func run(_ id: Int, _ active: Bool = false, attempt: Int = 1) -> [String: Any] {
+            ["id": id, "run_attempt": attempt, "head_sha": "abc", "status": active ? "in_progress" : "completed",
+             "conclusion": active ? NSNull() as Any : "success", "created_at": "2026-11-18T10:00:00Z",
+             "updated_at": "2026-11-18T10:10:00Z", "path": path, "event": "workflow_dispatch", "display_title": "korey-frontend/Zero - Deploy Services",
+             "html_url": "https://github.com/useshortcut/monorepo/actions/runs/\(id)"]
+        }
+        func job(_ name: String, _ step: String, _ status: String, _ conclusion: String?) -> [String: Any] {
+            ["id": 123, "status": "completed", "name": name + " (korey-replication-manager)",
+             "steps": [["name": step, "status": status, "conclusion": conclusion as Any? ?? NSNull()]]]
+        }
+
+        var secondPoll = false
+        var lookups: [String] = []
+        MockHTTP.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            if url.path.contains("/contents/") {
+                return (200, [:], ["encoding": "base64", "content": Data(yaml.utf8).base64EncodedString()])
+            }
+            if url.path.hasSuffix("/workflows/7/runs") {
+                return (200, [:], ["workflow_runs": secondPoll ? [run(1, attempt: 2), run(2)] : [run(1), run(2), run(3, true)]])
+            }
+            if url.path.hasSuffix("/actions/runs/3") { return (200, [:], run(3, true)) }
+            lookups.append(url.path)
+            if url.path.hasSuffix("/runs/1/attempts/1/jobs") || (secondPoll && url.path.hasSuffix("/runs/3/attempts/1/jobs")) {
+                return (200, [:], ["jobs": [job("deploy-services", "Check Production Deployment", "in_progress", nil)]])
+            }
+            if url.path.hasSuffix("/runs/2/attempts/1/jobs") || url.path.hasSuffix("/runs/1/attempts/2/jobs") {
+                return (200, [:], ["jobs": [job("build-package", "Read Zero Docker Tag", "completed", "success"),
+                                             job("deploy-services", "Check Production Deployment", "completed", "skipped")]])
+            }
+            XCTAssertTrue(url.path.hasSuffix("/runs/3/attempts/1/jobs"))
+            return (200, [:], ["jobs": [job("deploy-services", "Check Production Deployment", "pending", nil)]])
+        }
+
+        let (first, quiet) = try await api.poll(watch, shared: [], previous: Reading(), token: "test")
+        XCTAssertEqual(first.status.attempts.map(\.id), [1])
+        XCTAssertTrue(quiet.isEmpty)
+        XCTAssertTrue(first.needsFrequentPolling)
+        secondPoll = true
+        let (next, _) = try await api.poll(watch, shared: [], previous: first, token: "test")
+        XCTAssertEqual(next.status.attempts.map(\.id), [3])
+        XCTAssertEqual(next.status.latest?.parameters?["environment"], "production")
+        XCTAssertEqual(lookups.filter { $0.hasSuffix("/runs/2/attempts/1/jobs") }.count, 1)
+        XCTAssertEqual(lookups.filter { $0.hasSuffix("/runs/3/attempts/1/jobs") }.count, 2)
+    }
+
+    func testUnrelatedWorkflowTextInputUsesOnlyMatchingRunnerScript() async throws {
+        let yaml = """
+        on: {workflow_dispatch: {inputs: {customer: {type: string}}}}
+        jobs:
+          notify:
+            steps:
+              - name: Format message
+                run: |
+                  CLIENT="${{ inputs.customer }}"
+                  echo "Preparing message"
+        """
+        let repo = "example/notifications"
+        let path = ".github/workflows/message.yml"
+        var requestPaths: [String] = []
+        MockHTTP.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            requestPaths.append(url.path)
+            if url.path.hasSuffix("/contents/" + path) {
+                XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "revision")
+                return (200, [:], ["encoding": "base64", "content": Data(yaml.utf8).base64EncodedString()])
+            }
+            if url.path.hasSuffix("/jobs/17/logs") {
+                let lines = ["##[group]Run unrelated", "\u{1B}[36;1mCLIENT=\"wrong\"\u{1B}[0m", "shell: bash",
+                             "CLIENT=\"untrusted-output\"", "##[group]Run CLIENT=\"acme\"",
+                             "\u{1B}[36;1mCLIENT=\"acme\"\u{1B}[0m", "\u{1B}[36;1mecho \"Preparing message\"\u{1B}[0m", "shell: bash"]
+                return (200, [:], Data(lines.map { "2026-11-18T00:00:00Z " + $0 }.joined(separator: "\n").utf8))
+            }
+            if url.path.hasSuffix("/attempts/1/jobs") {
+                return (200, [:], ["jobs": [["id": 17, "status": "completed", "name": "notify",
+                                            "steps": [["name": "Format message", "status": "completed", "conclusion": "success"]]]]])
+            }
+            XCTAssertTrue(url.path.hasSuffix("/workflows/5/runs"))
+            XCTAssertTrue(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .contains(URLQueryItem(name: "event", value: "workflow_dispatch")) == true)
+            return (200, [:], ["workflow_runs": [["run_attempt": 1, "id": 1, "event": "workflow_dispatch",
+                "status": "completed", "conclusion": "success", "head_sha": "revision", "path": path,
+                "created_at": "2026-11-18T10:00:00Z", "updated_at": "2026-11-18T10:01:00Z",
+                "html_url": "https://github.com/example/notifications/actions/runs/1"]]])
+        }
+        let runs = try await api.workflowRuns(repo: repo, id: 5, token: "test", field: .input("customer"))
+        XCTAssertEqual(runs.first?.parameters, ["customer": "acme"])
+        XCTAssertTrue(requestPaths.contains { $0.hasSuffix("/jobs/17/logs") })
+    }
 
     func testCatalogIncludesSecondPageAndDisabledWorkflowsWithDuplicateNames() async throws {
         MockHTTP.handler = { request in
@@ -61,17 +172,28 @@ final class GitHubTests: XCTestCase {
              "display_title": "Deploy graphql → \(environment) @ \(branch)"]
         }
         var watch = Watch(repository: repo, environment: path, service: "Backend", stage: "Workflow", workflowID: 17)
-        watch.runFilter = WorkflowFilter(field: .environment, value: "production")
+        watch.runFilter = WorkflowFilter(field: .input("environment"), value: "production")
         var secondPoll = false
         MockHTTP.handler = { request in
             let url = try XCTUnwrap(request.url)
+            if url.path.contains("/contents/") {
+                let yaml = """
+                run-name: "Deploy ${{ inputs.service }} → ${{ inputs.environment }} @ ${{ github.ref_name }}"
+                on:
+                  workflow_dispatch:
+                    inputs:
+                      environment: {type: choice, required: true, options: [staging, production]}
+                      service: {type: string}
+                """
+                return (200, [:], ["encoding": "base64", "content": Data(yaml.utf8).base64EncodedString()])
+            }
             let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value
             let runs: [[String: Any]]
             if secondPoll {
                 runs = [run(202, environment: "staging", branch: "production", conclusion: "failure"),
                         run(201, environment: "production", branch: "main", conclusion: "failure")]
             } else if page == "1" {
-                runs = (100..<200).map { run($0, environment: "staging", branch: "production", conclusion: "failure") }
+                runs = (100..<108).map { run($0, environment: "staging", branch: "production", conclusion: "failure") }
             } else {
                 runs = [run(1, environment: "production", branch: "main", conclusion: "success")]
             }
@@ -80,7 +202,7 @@ final class GitHubTests: XCTestCase {
         let (initial, quiet) = try await api.poll(watch, shared: [], previous: Reading(), token: "test", now: clock)
         XCTAssertTrue(quiet.isEmpty)
         XCTAssertEqual(initial.status.latest?.id, 1)
-        XCTAssertEqual(initial.status.latest?.parameters, ["Environment": "production", "Service": "graphql"])
+        XCTAssertEqual(initial.status.latest?.parameters, ["environment": "production", "service": "graphql"])
         XCTAssertNil(initial.status.failure)
         secondPoll = true
         let (next, alerts) = try await api.poll(watch, shared: [], previous: initial, token: "test",
@@ -103,7 +225,7 @@ final class GitHubTests: XCTestCase {
         let run = try XCTUnwrap(runs.first)
         XCTAssertNil(run.parameters)
         XCTAssertTrue(WorkflowFilter(field: .title, value: "production").matches(run))
-        XCTAssertFalse(WorkflowFilter(field: .environment, value: "production").matches(run))
+        XCTAssertFalse(WorkflowFilter(field: .input("environment"), value: "production").matches(run))
     }
 
     func testFollowingWorkflowBeforeFirstRunAndThroughCompletion() async throws {

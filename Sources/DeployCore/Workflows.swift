@@ -70,11 +70,19 @@ extension GitHub {
         return results.sorted()
     }
 
-    public func workflowRuns(repo: String, id: Int, token: String, page: Int = 1, count: Int = 30) async throws -> [Attempt] {
+    public func workflowRuns(repo: String, id: Int, token: String, page: Int = 1, count: Int = 30, field: RunField? = nil) async throws -> [Attempt] {
         struct Page: Decodable { let workflowRuns: [WorkflowRun] }
-        let batch: Page = try await get("repos/\(repo)/actions/workflows/\(id)/runs", token: token,
-                                        query: ["page": String(page), "per_page": String(count)])
-        return batch.workflowRuns.map { Attempt(run: $0, repository: repo) }
+        var query = ["page": String(page), "per_page": String(count)]
+        if case .input = field { query["event"] = "workflow_dispatch" }
+        let batch: Page = try await get("repos/\(repo)/actions/workflows/\(id)/runs", token: token, query: query)
+        var attempts: [Attempt] = []
+        for run in batch.workflowRuns {
+            try Task.checkCancellation()
+            if field != nil || attempts.isEmpty {
+                attempts.append(try await resolvedAttempt(run, repo: repo, token: token, field: field, bestEffort: field == nil))
+            } else { attempts.append(Attempt(run: run)) }
+        }
+        return attempts
     }
 
     func pollWorkflow(repo: String, id: Int, filter: WorkflowFilter?, previous: Reading, token: String, now: Date) async throws -> (Reading, [Event]) {
@@ -86,14 +94,21 @@ extension GitHub {
         }
         var refreshed = Set<Int>()
         var page = 1
-        let count = filter == nil ? 30 : 100
-        while true {
-            let batch = try await workflowRuns(repo: repo, id: id, token: token, page: page, count: count)
-            for attempt in batch {
-                refreshed.insert(attempt.id)
-                if filter?.matches(attempt) != false { recent[attempt.id] = attempt }
-                else { recent.removeValue(forKey: attempt.id) }
+        let count = filter == nil ? 30 : (filter?.field == .title ? 100 : 8)
+        var unresolved = previous.unresolvedActiveRuns ?? []
+        func record(_ attempt: Attempt) {
+            refreshed.insert(attempt.id)
+            if case let .input(key) = filter?.field, attempt.phase.active && attempt.parameters?[key] == nil {
+                unresolved.insert(attempt.id)
+            } else {
+                unresolved.remove(attempt.id)
             }
+            if filter?.matches(attempt) != false { recent[attempt.id] = attempt }
+            else { recent.removeValue(forKey: attempt.id) }
+        }
+        while true {
+            let batch = try await workflowRuns(repo: repo, id: id, token: token, page: page, count: count, field: filter?.field)
+            for attempt in batch { record(attempt) }
             if batch.count < count { reading.history.exhausted = true; break }
             guard let checked = previous.status.checked, batch.allSatisfy({ $0.created >= checked }) else { break }
             page += 1
@@ -101,23 +116,23 @@ extension GitHub {
         // Rare parameter values can first occur well outside the latest page.
         // Backfill one extra page per poll until we know the latest matching
         // success and failure, or have reached the beginning of the workflow.
-        if let filter, !reading.history.exhausted {
+        if filter != nil, !reading.history.exhausted {
             let phases = recent.values.map(\.phase)
             if (reading.status.success == nil && !phases.contains(.succeeded)) ||
                 (reading.status.failure == nil && !phases.contains(.failed)) {
                 reading.history.page = max(reading.history.page, page + 1)
-                let older = try await workflowRuns(repo: repo, id: id, token: token, page: reading.history.page, count: count)
-                for attempt in older where filter.matches(attempt) { recent[attempt.id] = attempt }
+                let older = try await workflowRuns(repo: repo, id: id, token: token, page: reading.history.page, count: count, field: filter?.field)
+                for attempt in older where !refreshed.contains(attempt.id) { record(attempt) }
                 reading.history.page += 1
                 reading.history.exhausted = older.count < count
             }
         }
-        for old in previous.status.active where !refreshed.contains(old.id) {
-            let run: WorkflowRun = try await get("repos/\(repo)/actions/runs/\(old.id)", token: token)
-            let attempt = Attempt(run: run, repository: repo)
-            if filter?.matches(attempt) != false { recent[old.id] = attempt }
-            else { recent.removeValue(forKey: old.id) }
+        let outstanding = Set(previous.status.active.map(\.id)).union(unresolved).subtracting(refreshed)
+        for runID in outstanding {
+            let run: WorkflowRun = try await get("repos/\(repo)/actions/runs/\(runID)", token: token)
+            record(try await resolvedAttempt(run, repo: repo, token: token, field: filter?.field, bestEffort: filter == nil))
         }
+        reading.unresolvedActiveRuns = unresolved.isEmpty ? nil : unresolved
         let events = reading.status.update(recent: Array(recent.values), history: [], at: now)
         if filter != nil {
             let keep = Set(reading.status.attempts.prefix(30).map(\.id))

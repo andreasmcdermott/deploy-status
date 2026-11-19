@@ -10,6 +10,8 @@ public struct History: Codable {
 public struct Reading: Codable {
     public var status = Snapshot()
     public var history = History()
+    var unresolvedActiveRuns: Set<Int>?
+    public var needsFrequentPolling: Bool { !status.active.isEmpty || unresolvedActiveRuns?.isEmpty == false }
     public init() {}
 }
 

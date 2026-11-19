@@ -23,7 +23,7 @@ Choose **Connect GitHub… → Account** and pick a method.
 
 After connecting, choose **Services → Add service** and select a repository. Under **Workflow**, search by name or YAML filename and check one or more workflows. Your selections carry across searches. Click **Follow workflow** or **Follow N workflows** to add them together. To change a display name later, open **Services**, click **•••** beside the item, and choose **Rename…**. The next time you add a service, the picker opens on your last repository if you still have access. Workflow rows show the outcome of the whole run, including runs across branches. In **Environment → Browse…**, choose a GitHub environment to track an individual rollout. Both lists include entries with no recent activity.
 
-Fine-grained tokens and GitHub Apps need **Actions: read** to list workflows and runs, **Deployments: read** to track rollouts, and **Environments: read** to browse environments. You can also enter the exact name of a previously deployed environment with Deployments access alone.
+Fine-grained tokens and GitHub Apps need **Actions: read** to list workflows and runs, **Contents: read** to discover workflow inputs, **Deployments: read** to track rollouts, and **Environments: read** to browse environments. You can also enter the exact name of a previously deployed environment with Deployments access alone.
 
 ### Optional GitHub App registration
 
@@ -38,9 +38,11 @@ Each installation can share its public client ID. To include it in a build, set 
 
 ## Filter workflow runs
 
-Under **Services**, open **••• → Filter runs…** beside a followed workflow. For `backend-deploy.yml` and `backend-deploy-non-jvm.yml` in the Shortcut monorepo, choose **Environment equals** and enter `production`, or filter on **Service**. The HAProxy deploy workflow supports **Deployment group**. The editor previews recent matches. The menu bar row, its success and failure times, and notifications use the saved filter. Choose **All runs** to clear it.
+Open **Services → ••• → Filter runs…** beside a workflow. The app reads its `on.workflow_dispatch.inputs` definition from the default branch. Choice and boolean inputs get a picker. Text, number, and environment inputs accept a value. For **Zero - Deploy API**, select **Environment equals → production**. **Force equals** is available independently. Select **All runs** to clear a filter.
 
-Expand a workflow row to see its GitHub run title and any recognized values. GitHub’s run API omits the original dispatch inputs. The exact filters read the values these workflows publish in their run titles. Other workflows support **Run title contains**, which searches the complete title, including branch text. Inputs omitted from the title are unavailable through this feature.
+Input discovery requires repository **Contents: read** in addition to **Actions: read**. GitHub CLI uses its existing repository access. Title filtering remains available with Actions access alone.
+
+For each manual run, the app reads the workflow version at that commit. It matches values confirmed by the published run title, an executed conditional step, or runner-printed lines from a completed job that match the workflow script. GitHub’s run API does not return the original dispatch payload. A default, an ambiguous expression, an expired log, or a masked value cannot confirm a match. A workflow that never exposes an input value may offer the input in the picker and have no confirmed matches. **Run title contains** filters published titles across all trigger types.
 
 ## Shortcut environments
 

@@ -1,10 +1,11 @@
 import Foundation
 
 public enum ServiceError: LocalizedError {
-    case message(String), unauthorized, rateLimit(Date)
+    case message(String), http(Int, String), unauthorized, rateLimit(Date)
     public var errorDescription: String? {
         switch self {
         case .message(let text): return text
+        case .http(let status, let message): return "GitHub \(status): \(message)"
         case .unauthorized: return "Your GitHub session expired. Reconnect in Settings."
         case .rateLimit(let date): return "GitHub paused requests until \(date.formatted(date: .omitted, time: .standard))."
         }
@@ -64,12 +65,33 @@ public struct OAuthReply: Decodable {
 }
 
 public final class GitHub {
-    private let session: URLSession
-    public init(session: URLSession = URLSession(configuration: .ephemeral)) { self.session = session }
+    let definitions = NSCache<NSString, WorkflowDefinition>()
+    let evidence = NSCache<NSString, InputEvidence>()
+    let session: URLSession
+    public init(session: URLSession = URLSession(configuration: .ephemeral)) { self.session = session; definitions.countLimit = 512; evidence.countLimit = 1024 }
+
+    public func clearWorkflowCaches() {
+        definitions.removeAllObjects()
+        evidence.removeAllObjects()
+    }
 
     private func decode<T: Decodable>(_ type: T.Type, request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        try checkResponse(http, data: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        do { return try decoder.decode(type, from: data) }
+        catch {
+            if let reply = try? decoder.decode(OAuthReply.self, from: data), let reason = reply.error {
+                throw ServiceError.message(reply.errorDescription ?? reason)
+            }
+            throw error
+        }
+    }
+
+    func checkResponse(_ http: HTTPURLResponse, data: Data) throws {
         switch http.statusCode {
         case 200..<300: break
         case 401: throw ServiceError.unauthorized
@@ -84,17 +106,7 @@ public final class GitHub {
                     .flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
                 throw ServiceError.rateLimit(date ?? Date().addingTimeInterval(60))
             }
-            throw ServiceError.message("GitHub \(http.statusCode): \(message ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode))")
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        do { return try decoder.decode(type, from: data) }
-        catch {
-            if let reply = try? decoder.decode(OAuthReply.self, from: data), let reason = reply.error {
-                throw ServiceError.message(reply.errorDescription ?? reason)
-            }
-            throw error
+            throw ServiceError.http(http.statusCode, message ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
     }
 
@@ -144,6 +156,10 @@ public final class GitHub {
     }
 
     func get<T: Decodable>(_ path: String, token: String, query: [String: String] = [:]) async throws -> T {
+        try await decode(T.self, request: apiRequest(path, token: token, query: query))
+    }
+
+    func apiRequest(_ path: String, token: String, query: [String: String] = [:]) throws -> URLRequest {
         var parts = URLComponents()
         parts.scheme = "https"
         parts.host = "api.github.com"
@@ -154,7 +170,7 @@ public final class GitHub {
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        return try await decode(T.self, request: request)
+        return request
     }
 
     public func login(token: String) async throws -> String {

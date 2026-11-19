@@ -90,7 +90,7 @@ struct WatchRow: View {
                             Text(watch.service).foregroundStyle(.primary).font(.body.weight(.semibold)).lineLimit(1)
                                 .truncationMode(.middle).layoutPriority(1)
                             Spacer(minLength: 8)
-                            Text(watch.runFilter?.label ?? status.latest?.parameters?[RunField.environment.rawValue] ?? watch.stage).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Text(watch.runFilter?.label ?? status.latest?.parameters?["environment"] ?? status.latest?.parameters?["Environment"] ?? watch.stage).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         if let attempt = status.latest {
                             let time = attempt.current?.date ?? attempt.created

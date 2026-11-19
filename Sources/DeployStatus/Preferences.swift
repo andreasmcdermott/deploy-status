@@ -64,7 +64,7 @@ private struct Account: View {
                             Text("Use the GitHub CLI account signed in on this Mac.").foregroundStyle(.secondary)
                         case .personal:
                             SecureField("Personal access token", text: $personalToken)
-                            Text("Choose your work organization and grant read-only Actions access for workflows or Deployments access for rollouts. Add Environments access to browse rollout targets.")
+                            Text("Choose your work organization and grant read-only Actions access for workflows or Deployments access for rollouts. Add Contents access for workflow inputs and Environments access to browse rollout targets.")
                                 .foregroundStyle(.secondary)
                             Link("Create a fine-grained token ↗", destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!)
                         case .app:
@@ -73,9 +73,9 @@ private struct Account: View {
                                 Text("Enter this code on GitHub to finish signing in.").foregroundStyle(.secondary)
                                 Text(code.userCode).font(.title3.monospaced().weight(.medium)).textSelection(.enabled)
                             } else {
-                                Text("Enable device flow and grant read-only Actions access for workflows or Deployments and Environments access for rollouts. Install it on the repositories you follow.")
+                                Text("Enable device flow. Grant read-only Actions and Contents access for workflow inputs, or Deployments and Environments access for rollouts. Install it on the repositories you follow.")
                                     .foregroundStyle(.secondary)
-                                Link("Register a GitHub App ↗", destination: URL(string: "https://github.com/settings/apps/new?name=Deploy+Status&url=https%3A%2F%2Fgithub.com&webhook_active=false&actions=read&deployments=read&environments=read&public=false")!)
+                                Link("Register a GitHub App ↗", destination: URL(string: "https://github.com/settings/apps/new?name=Deploy+Status&url=https%3A%2F%2Fgithub.com&webhook_active=false&actions=read&contents=read&deployments=read&environments=read&public=false")!)
                             }
                         }
                     }

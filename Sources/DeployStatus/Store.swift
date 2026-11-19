@@ -91,6 +91,7 @@ final class Store: ObservableObject {
     }
 
     private func invalidateSession() {
+        api.clearWorkflowCaches()
         generation = UUID()
         timer?.cancel()
         renewal?.cancel()
@@ -189,7 +190,7 @@ final class Store: ObservableObject {
 
     private func schedule() {
         guard credential != nil, !reconnect, !state.watches.isEmpty else { return }
-        let busy = state.readings.values.contains { !$0.status.active.isEmpty }
+        let busy = state.readings.values.contains { $0.needsFrequentPolling }
         let delay = max(busy ? 15.0 : 60.0, cooldown.timeIntervalSinceNow)
         timer = Task {
             do { try await Task.sleep(for: .seconds(delay)); refresh() } catch {}

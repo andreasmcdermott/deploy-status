@@ -96,9 +96,9 @@ public struct Attempt: Codable, Identifiable {
     public private(set) var runTitle: String?
     public private(set) var parameters: [String: String]?
 
-    init(run: WorkflowRun, repository: String) {
+    init(run: WorkflowRun, inputs: [String: String] = [:]) {
         runTitle = run.displayTitle
-        parameters = run.parameters(repository: repository)
+        parameters = inputs.isEmpty ? nil : inputs
         id = run.id
         created = run.runStartedAt ?? run.createdAt
         sha = run.headSha

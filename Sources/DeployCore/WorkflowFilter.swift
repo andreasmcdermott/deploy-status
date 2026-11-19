@@ -1,19 +1,32 @@
 import Foundation
 
-public enum RunField: String, Codable, CaseIterable {
-    case environment = "Environment", service = "Service", deploymentGroup = "Deployment group"
-    case title = "Run title contains"
+public enum RunField: Hashable, Codable {
+    case title, input(String)
 
-    // These three run-name templates expose dispatch inputs in monorepo.
-    // Other workflows can always be filtered using their published title.
-    public static func available(repository: String, path: String) -> [RunField] {
-        guard repository.lowercased() == "useshortcut/monorepo" else { return [.title] }
-        switch path {
-        case ".github/workflows/backend-deploy.yml", ".github/workflows/backend-deploy-non-jvm.yml":
-            return [.environment, .service, .title]
-        case ".github/workflows/backend-deploy-haproxy-lb.yml":
-            return [.deploymentGroup, .title]
-        default: return [.title]
+    public var label: String {
+        switch self {
+        case .title: return "Run title contains"
+        case .input(let key):
+            let words = key.replacingOccurrences(of: "_", with: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "Run title contains": self = .title
+        case "Environment": self = .input("environment")
+        case "Service": self = .input("service")
+        case "Deployment group": self = .input("deployment_group")
+        default: self = .input(raw.hasPrefix("input:") ? String(raw.dropFirst(6)) : raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case .title: try value.encode("Run title contains")
+        case .input(let key): try value.encode("input:" + key)
         }
     }
 }
@@ -28,27 +41,13 @@ public struct WorkflowFilter: Codable, Equatable {
     }
 
     public var label: String {
-        field == .title ? "Title contains “\(value)”" : "\(field.rawValue) = \(value)"
+        field == .title ? "Title contains “\(value)”" : "\(field.label) = \(value)"
     }
 
     public func matches(_ attempt: Attempt) -> Bool {
-        if field == .title { return attempt.runTitle?.localizedCaseInsensitiveContains(value) == true }
-        return attempt.parameters?[field.rawValue] == value
-    }
-}
-
-extension WorkflowRun {
-    func parameters(repository: String) -> [String: String]? {
-        guard event == "workflow_dispatch", let path, let title = displayTitle, title.hasPrefix("Deploy "),
-              let ref = headBranch, !ref.isEmpty, title.hasSuffix(" @ " + ref) else { return nil }
-        let fields = RunField.available(repository: repository, path: path)
-        guard fields != [.title] else { return nil }
-        let body = title.dropFirst("Deploy ".count).dropLast((" @ " + ref).count)
-        let parts = body.components(separatedBy: " → ")
-        guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
-        if fields.contains(.deploymentGroup) {
-            return parts[0] == "haproxy-lb" ? [RunField.deploymentGroup.rawValue: parts[1]] : nil
+        switch field {
+        case .title: return attempt.runTitle?.localizedCaseInsensitiveContains(value) == true
+        case .input(let key): return attempt.parameters?[key] == value
         }
-        return [RunField.service.rawValue: parts[0], RunField.environment.rawValue: parts[1]]
     }
 }
